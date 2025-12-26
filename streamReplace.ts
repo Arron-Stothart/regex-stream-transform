@@ -59,9 +59,12 @@ function applyReplacement(
 ): string {
   const match: Match = { text, groups, start };
   if (typeof replacement === 'function') return replacement(match);
-  return replacement.replace(/\$(\d+)/g, (_, n) =>
-    n === '0' ? text : (groups[+n - 1] ?? ''),
-  );
+  return replacement.replace(/\$(\$|&|\d+)/g, (_, token) => {
+    if (token === '$') return '$';
+    if (token === '&') return text;
+    const n = +token;
+    return groups[n - 1] ?? '';
+  });
 }
 
 interface State {
