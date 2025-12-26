@@ -1,5 +1,5 @@
 export interface Match {
-    text: string;
-    groups: string[];
-    start: number;
-  }
+  text: string;
+  groups: string[];
+  start: number;
+}
