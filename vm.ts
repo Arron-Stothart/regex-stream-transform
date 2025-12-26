@@ -1,6 +1,7 @@
 export type Inst =
   | { op: 'char'; c: string }
   | { op: 'any' }
+  | { op: 'jmp'; to: number }
   | { op: 'split'; x: number; y: number }
   | { op: 'save'; slot: number }
   | { op: 'match' };
@@ -29,6 +30,9 @@ function addThread(
   const inst = prog.insts[pc];
 
   switch (inst.op) {
+    case 'jmp':
+      addThread(prog, threads, seen, inst.to, saved, pos);
+      break;
     case 'split':
       addThread(prog, threads, seen, inst.x, saved, pos);
       addThread(prog, threads, seen, inst.y, saved, pos);
