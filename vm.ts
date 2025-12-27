@@ -1,5 +1,6 @@
 export type Inst =
   | { op: 'char'; c: string }
+  | { op: 'charset'; chars: Set<string>; negate: boolean }
   | { op: 'any' }
   | { op: 'jmp'; to: number }
   | { op: 'split'; x: number; y: number }
@@ -66,6 +67,13 @@ export function step(
           addThread(prog, next, seen, t.pc + 1, t.saved, pos + 1);
         }
         break;
+      case 'charset': {
+        const match = inst.negate ? !inst.chars.has(char) : inst.chars.has(char);
+        if (match) {
+          addThread(prog, next, seen, t.pc + 1, t.saved, pos + 1);
+        }
+        break;
+      }
       case 'any':
         addThread(prog, next, seen, t.pc + 1, t.saved, pos + 1);
         break;
