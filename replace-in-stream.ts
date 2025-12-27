@@ -7,6 +7,14 @@ export interface Match {
   start: number;
 }
 
+export interface State {
+  buffer: string;
+  globalPos: number;
+  atEnd: boolean;
+}
+
+export type Replacement = string | ((match: Match) => string);
+
 type MatchResult =
   | { status: 'match'; end: number; thread: Thread }
   | { status: 'none' }
@@ -39,8 +47,6 @@ function findMatch(
   return best ? { status: 'match', ...best } : { status: 'none' };
 }
 
-type Replacement = string | ((match: Match) => string);
-
 function extractGroups(saved: (number | null)[], source: string): string[] {
   const groups: string[] = [];
   for (let i = 0; i < saved.length; i += 2) {
@@ -67,13 +73,7 @@ function applyReplacement(
   });
 }
 
-interface State {
-  buffer: string;
-  globalPos: number;
-  atEnd: boolean;
-}
-
-function process(
+export function process(
   prog: Program,
   replacement: Replacement,
   state: State,
@@ -132,7 +132,7 @@ function process(
   }
 }
 
-export function streamReplace({
+export function replaceInStream({
   pattern,
   replacement,
 }: {

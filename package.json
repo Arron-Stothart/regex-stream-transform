@@ -5,12 +5,16 @@
   "type": "module",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "import": "./dist/replace-in-stream.js",
+      "types": "./dist/replace-in-stream.d.ts"
+    },
+    "./ai": {
+      "import": "./dist/replace-in-ai-sdk-stream.js",
+      "types": "./dist/replace-in-ai-sdk-stream.d.ts"
     }
   },
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/replace-in-stream.js",
+  "types": "./dist/replace-in-stream.d.ts",
   "files": [
     "dist"
   ],
@@ -30,7 +34,16 @@
     "streaming"
   ],
   "license": "MIT",
+  "peerDependencies": {
+    "ai": ">=5.0.0-beta.1"
+  },
+  "peerDependenciesMeta": {
+    "ai": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "ai": "^5.0.0-beta.1",
     "@eslint/js": "^9.39.2",
     "@types/node": "^22.0.0",
     "eslint": "^9.39.2",
