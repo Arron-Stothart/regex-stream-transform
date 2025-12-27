@@ -33,7 +33,7 @@ function findMatch(
 
     if (active.length === 0) break;
 
-    threads = step(prog, active, text[i], i).threads;
+    threads = step(prog, active, text[i], i);
   }
 
   return best ? { status: 'match', ...best } : { status: 'none' };

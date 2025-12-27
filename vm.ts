@@ -53,10 +53,9 @@ export function step(
   threads: Thread[],
   char: string,
   pos: number,
-): { threads: Thread[]; matched: Thread | null } {
+): Thread[] {
   const next: Thread[] = [];
   const seen = new Set<number>();
-  let matched: Thread | null = null;
 
   for (const t of threads) {
     const inst = prog.insts[t.pc];
@@ -70,13 +69,10 @@ export function step(
       case 'any':
         addThread(prog, next, seen, t.pc + 1, t.saved, pos + 1);
         break;
-      case 'match':
-        if (!matched) matched = t;
-        break;
     }
   }
 
-  return { threads: next, matched };
+  return next;
 }
 
 export function start(prog: Program, pos: number): Thread[] {

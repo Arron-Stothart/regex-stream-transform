@@ -20,7 +20,7 @@ export function compile(pattern: string): Program {
 
   function parseAtom(): { start: number } | null {
     const c = peek();
-    if (c === undefined || '*+?|)'.includes(c)) return null;
+    if (c === undefined || '*+?)'.includes(c)) return null;
 
     const start = insts.length;
 
@@ -30,7 +30,7 @@ export function compile(pattern: string): Program {
         const slot = numSlots;
         numSlots += 2;
         emit({ op: 'save', slot });
-        parseExpr();
+        parse();
         if (peek() !== ')') throw new Error('Unclosed (');
         next();
         emit({ op: 'save', slot: slot + 1 });
@@ -96,31 +96,14 @@ export function compile(pattern: string): Program {
     }
   }
 
-  function parseTerm(): void {
+  function parse(): void {
     while (peek() !== undefined && peek() !== ')') {
       parseFactor();
     }
   }
 
-  function parseExpr(): void {
-    parseTerm();
-  }
-
-  parseExpr();
+  parse();
   emit({ op: 'match' });
 
   return { insts, numSlots };
-}
-
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const tests = ['abc', 'a.c', 'a*', 'a+', 'a?', 'a(.)c', '(a*)', '\\.'];
-
-  for (const pattern of tests) {
-    console.log(`\n"${pattern}":`);
-    const prog = compile(pattern);
-    prog.insts.forEach((inst, idx) => {
-      console.log(`  ${idx}: ${JSON.stringify(inst)}`);
-    });
-    console.log(`  slots: ${prog.numSlots}`);
-  }
 }
