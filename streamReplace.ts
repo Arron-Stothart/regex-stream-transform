@@ -132,10 +132,13 @@ function process(
   }
 }
 
-export function streamReplace(
-  pattern: RegExp | string,
-  replacement: Replacement,
-): TransformStream<string, string> {
+export function streamReplace({
+  pattern,
+  replacement,
+}: {
+  pattern: RegExp | string;
+  replacement: Replacement;
+}): TransformStream<string, string> {
   const prog =
     typeof pattern === 'string' ? compile(pattern) : compile(pattern.source);
   let state: State = { buffer: '', globalPos: 0, atEnd: false };
