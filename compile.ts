@@ -18,6 +18,28 @@ export function compile(pattern: string): Program {
     return pattern[i++];
   }
 
+  function consume(c: string) {
+    return peek() === c && (next(), true);
+  }
+
+  function parseCharClass(): Inst {
+    const negate = consume('^');
+    const chars = new Set<string>();
+    const read = () => (consume('\\') ? next() : next());
+
+    while (peek() && peek() !== ']') {
+      const start = read().charCodeAt(0);
+      const end =
+        peek() === '-' && pattern[i + 1] !== ']'
+          ? (next(), read().charCodeAt(0))
+          : start;
+      for (let c = start; c <= end; c++) chars.add(String.fromCharCode(c));
+    }
+
+    if (!consume(']')) throw new Error('Unclosed [');
+    return { op: 'charset', chars, negate };
+  }
+
   function parseAtom(): { start: number } | null {
     const c = peek();
     if (c === undefined || '*+?)'.includes(c)) return null;
@@ -25,6 +47,11 @@ export function compile(pattern: string): Program {
     const start = insts.length;
 
     switch (c) {
+      case '[':
+        next();
+        emit(parseCharClass());
+        break;
+
       case '(': {
         next();
         const slot = numSlots;

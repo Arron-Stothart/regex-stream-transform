@@ -68,7 +68,9 @@ export function step(
         }
         break;
       case 'charset': {
-        const match = inst.negate ? !inst.chars.has(char) : inst.chars.has(char);
+        const match = inst.negate
+          ? !inst.chars.has(char)
+          : inst.chars.has(char);
         if (match) {
           addThread(prog, next, seen, t.pc + 1, t.saved, pos + 1);
         }
