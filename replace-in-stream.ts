@@ -10,7 +10,6 @@ export interface Match {
 export interface State {
   buffer: string;
   globalPos: number;
-  atEnd: boolean;
 }
 
 export type Replacement = string | ((match: Match) => string);
@@ -23,36 +22,44 @@ type MatchResult =
 function findMatch(
   prog: Program,
   text: string,
+  offset: number,
   complete: boolean,
 ): MatchResult {
+  const len = text.length;
   let threads = start(prog, 0);
   let best: { end: number; thread: Thread } | null = null;
 
-  for (let i = 0; i <= text.length; i++) {
+  for (let i = 0; i <= len - offset; i++) {
     const match = threads.find((t) => prog.insts[t.pc].op === 'match');
     if (match) best = { end: i, thread: match };
 
     const active = threads.filter((t) => prog.insts[t.pc].op !== 'match');
 
-    if (i === text.length) {
+    if (offset + i === len) {
       if (!complete && active.length > 0) return { status: 'partial' };
       break;
     }
 
     if (active.length === 0) break;
 
-    threads = step(prog, active, text[i], i);
+    threads = step(prog, active, text[offset + i], i);
   }
 
   return best ? { status: 'match', ...best } : { status: 'none' };
 }
 
-function extractGroups(saved: (number | null)[], source: string): string[] {
+function extractGroups(
+  saved: (number | null)[],
+  source: string,
+  offset: number,
+): string[] {
   const groups: string[] = [];
   for (let i = 0; i < saved.length; i += 2) {
     const s = saved[i];
     const e = saved[i + 1];
-    groups.push(s !== null && e !== null ? source.slice(s, e) : '');
+    groups.push(
+      s !== null && e !== null ? source.slice(offset + s, offset + e) : '',
+    );
   }
   return groups;
 }
@@ -80,56 +87,55 @@ export function process(
   chunk: string,
   flush: boolean,
 ): { output: string; state: State } {
-  let { buffer, globalPos, atEnd } = state;
+  let { buffer, globalPos } = state;
   buffer += chunk;
   let output = '';
+  let pos = 0;
 
-  while (true) {
-    // Check for final empty match at end of stream
-    if (flush && buffer.length === 0 && !atEnd) {
-      atEnd = true;
-      const result = findMatch(prog, '', true);
-      if (result.status === 'match') {
-        const groups = extractGroups(result.thread.saved, '');
-        output += applyReplacement(replacement, '', groups, globalPos);
-      }
-      return { output, state: { buffer, globalPos, atEnd } };
-    }
-
-    if (buffer.length === 0) {
-      return { output, state: { buffer, globalPos, atEnd } };
-    }
-
-    const result = findMatch(prog, buffer, flush);
+  while (pos < buffer.length) {
+    const result = findMatch(prog, buffer, pos, flush);
 
     switch (result.status) {
       case 'match': {
         const { end, thread } = result;
-        const text = buffer.slice(0, end);
-        const groups = extractGroups(thread.saved, buffer);
+        const text = buffer.slice(pos, pos + end);
+        const groups = extractGroups(thread.saved, buffer, pos);
         output += applyReplacement(replacement, text, groups, globalPos);
 
         if (end === 0) {
-          output += buffer[0];
-          buffer = buffer.slice(1);
+          output += buffer[pos];
+          pos++;
           globalPos++;
         } else {
-          buffer = buffer.slice(end);
+          pos += end;
           globalPos += end;
         }
         break;
       }
 
       case 'none':
-        output += buffer[0];
-        buffer = buffer.slice(1);
+        output += buffer[pos];
+        pos++;
         globalPos++;
         break;
 
       case 'partial':
-        return { output, state: { buffer, globalPos, atEnd } };
+        return {
+          output,
+          state: { buffer: buffer.slice(pos), globalPos },
+        };
     }
   }
+
+  if (flush) {
+    const result = findMatch(prog, '', 0, true);
+    if (result.status === 'match') {
+      const groups = extractGroups(result.thread.saved, '', 0);
+      output += applyReplacement(replacement, '', groups, globalPos);
+    }
+  }
+
+  return { output, state: { buffer: '', globalPos } };
 }
 
 export function replaceInStream({
@@ -141,7 +147,7 @@ export function replaceInStream({
 }): TransformStream<string, string> {
   const prog =
     typeof pattern === 'string' ? compile(pattern) : compile(pattern.source);
-  let state: State = { buffer: '', globalPos: 0, atEnd: false };
+  let state: State = { buffer: '', globalPos: 0 };
 
   return new TransformStream({
     transform(chunk, controller) {

@@ -12,7 +12,7 @@ export function replaceInAISDKStream<TOOLS extends ToolSet = ToolSet>({
   return () => {
     const prog =
       typeof pattern === 'string' ? compile(pattern) : compile(pattern.source);
-    let state: State = { buffer: '', globalPos: 0, atEnd: false };
+    let state: State = { buffer: '', globalPos: 0 };
     let id = '';
 
     const emit = (
@@ -34,7 +34,7 @@ export function replaceInAISDKStream<TOOLS extends ToolSet = ToolSet>({
               true,
             );
             emit(controller, output + s.buffer);
-            state = { buffer: '', globalPos: s.globalPos, atEnd: false };
+            state = { buffer: '', globalPos: s.globalPos };
           }
           controller.enqueue(chunk);
           return;
@@ -65,3 +65,28 @@ export function replaceInAISDKStream<TOOLS extends ToolSet = ToolSet>({
     });
   };
 }
+
+// --- Ideal use cases (not yet implemented) ---
+export const removeMarkdownLinks = replaceInAISDKStream({
+  pattern: /\[([^\]]+)\]\([^)]+\)/g,
+  replacement: '$1',
+});
+
+export const removeXmlTags = replaceInAISDKStream({
+  pattern: /<\/?[a-zA-Z][^>]*>/g,
+  replacement: '',
+});
+
+export const redactSecrets = (minLength = 20) =>
+  replaceInAISDKStream({
+    pattern: new RegExp(
+      `(?:sk|pk|api|key|token|secret|password)[_-]?[a-zA-Z0-9]{${minLength},}`,
+      'gi',
+    ),
+    replacement: '[REDACTED]',
+  });
+
+export const externalizeLinks = replaceInAISDKStream({
+  pattern: /<a href="([^"]+)">/g,
+  replacement: '<a href="$1" target="_blank" rel="noopener">',
+});
