@@ -12,7 +12,8 @@ export type RE =
   | { type: 'group'; body: RE };
 
 function parse(pattern: string): { re: RE; numSlots: number } {
-  let i = 0, numSlots = 0;
+  let i = 0;
+  let numSlots = 0;
   const peek = () => pattern[i];
   const next = () => pattern[i++];
   const consume = (c: string) => peek() === c && (next(), true);
@@ -23,9 +24,10 @@ function parse(pattern: string): { re: RE; numSlots: number } {
     const read = () => (consume('\\') ? next() : next());
     while (peek() && peek() !== ']') {
       const start = read().charCodeAt(0);
-      const end = peek() === '-' && pattern[i + 1] !== ']'
-        ? (next(), read().charCodeAt(0))
-        : start;
+      const end =
+        peek() === '-' && pattern[i + 1] !== ']'
+          ? (next(), read().charCodeAt(0))
+          : start;
       for (let c = start; c <= end; c++) chars.add(String.fromCharCode(c));
     }
     if (!consume(']')) throw new Error('Unclosed [');
@@ -36,7 +38,9 @@ function parse(pattern: string): { re: RE; numSlots: number } {
     const c = peek();
     if (c === undefined || '*+?)|'.includes(c)) return null;
     switch (c) {
-      case '[': next(); return parseCharClass();
+      case '[':
+        next();
+        return parseCharClass();
       case '(': {
         next();
         const body = parseAlt();
@@ -44,14 +48,18 @@ function parse(pattern: string): { re: RE; numSlots: number } {
         numSlots += 2;
         return { type: 'group', body };
       }
-      case '.': next(); return { type: 'any' };
+      case '.':
+        next();
+        return { type: 'any' };
       case '\\': {
         next();
         const escaped = next();
         if (escaped === undefined) throw new Error('Trailing \\');
         return { type: 'char', c: escaped };
       }
-      default: next(); return { type: 'char', c };
+      default:
+        next();
+        return { type: 'char', c };
     }
   }
 
@@ -59,16 +67,24 @@ function parse(pattern: string): { re: RE; numSlots: number } {
     const atom = parseAtom();
     if (!atom) return null;
     switch (peek()) {
-      case '*': next(); return { type: 'star', body: atom };
-      case '+': next(); return { type: 'plus', body: atom };
-      case '?': next(); return { type: 'opt', body: atom };
-      default: return atom;
+      case '*':
+        next();
+        return { type: 'star', body: atom };
+      case '+':
+        next();
+        return { type: 'plus', body: atom };
+      case '?':
+        next();
+        return { type: 'opt', body: atom };
+      default:
+        return atom;
     }
   }
 
   function parseTerm(): RE {
     const items: RE[] = [];
-    for (let f; (f = parseFactor()); ) items.push(f);
+    let f;
+    while ((f = parseFactor())) items.push(f);
     return items.length === 1 ? items[0] : { type: 'seq', items };
   }
 
@@ -89,10 +105,18 @@ export function compile(pattern: string): Program {
 
   function gen(re: RE): void {
     switch (re.type) {
-      case 'char': emit({ op: 'char', c: re.c }); break;
-      case 'any': emit({ op: 'any' }); break;
-      case 'charset': emit({ op: 'charset', chars: re.chars, negate: re.negate }); break;
-      case 'seq': re.items.forEach(gen); break;
+      case 'char':
+        emit({ op: 'char', c: re.c });
+        break;
+      case 'any':
+        emit({ op: 'any' });
+        break;
+      case 'charset':
+        emit({ op: 'charset', chars: re.chars, negate: re.negate });
+        break;
+      case 'seq':
+        re.items.forEach(gen);
+        break;
       case 'alt': {
         const s = emit({ op: 'split', x: 0, y: 0 });
         const leftStart = insts.length;
