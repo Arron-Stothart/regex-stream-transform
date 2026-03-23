@@ -1,15 +1,79 @@
 import { Inst, Program } from './vm';
 
+type Ranges = [number, number][];
+
 export type RE =
-  | { type: 'char'; c: string }
-  | { type: 'any' }
-  | { type: 'charset'; chars: Set<string>; negate: boolean }
+  | { type: 'ranges'; ranges: Ranges; negate: boolean }
   | { type: 'seq'; items: RE[] }
   | { type: 'alt'; left: RE; right: RE }
   | { type: 'star'; body: RE }
   | { type: 'plus'; body: RE }
   | { type: 'opt'; body: RE }
   | { type: 'group'; body: RE };
+
+type Escape = { ranges: Ranges; negate: boolean } | { code: number };
+
+const ESCAPES: Record<string, Escape> = {
+  t: { code: 9 },
+  n: { code: 10 },
+  r: { code: 13 },
+  f: { code: 12 },
+  v: { code: 11 },
+  a: { code: 7 },
+  '0': { code: 0 },
+  d: { ranges: [[48, 57]], negate: false },
+  D: { ranges: [[48, 57]], negate: true },
+  w: {
+    ranges: [
+      [48, 57],
+      [65, 90],
+      [97, 122],
+      [95, 95],
+    ],
+    negate: false,
+  },
+  W: {
+    ranges: [
+      [48, 57],
+      [65, 90],
+      [97, 122],
+      [95, 95],
+    ],
+    negate: true,
+  },
+  s: {
+    ranges: [
+      [9, 13],
+      [32, 32],
+    ],
+    negate: false,
+  },
+  S: {
+    ranges: [
+      [9, 13],
+      [32, 32],
+    ],
+    negate: true,
+  },
+};
+
+const META = new Set('*+?()|[]{}\\.^$-'.split(''));
+
+function cc(code: number): RE {
+  return { type: 'ranges', ranges: [[code, code]], negate: false };
+}
+
+function resolveEscape(c: string): Escape {
+  const e = ESCAPES[c];
+  if (e) return e;
+  if (META.has(c)) return { code: c.charCodeAt(0) };
+  throw new Error(`Invalid escape \\${c}`);
+}
+
+function escapeToRE(e: Escape): RE {
+  if ('code' in e) return cc(e.code);
+  return { type: 'ranges', ranges: e.ranges, negate: e.negate };
+}
 
 function parse(pattern: string): { re: RE; numSlots: number } {
   let i = 0;
@@ -18,20 +82,39 @@ function parse(pattern: string): { re: RE; numSlots: number } {
   const next = () => pattern[i++];
   const consume = (c: string) => peek() === c && (next(), true);
 
+  function readEscape(): Escape {
+    const c = next();
+    if (c === undefined) throw new Error('Trailing \\');
+    return resolveEscape(c);
+  }
+
   function parseCharClass(): RE {
     const negate = consume('^');
-    const chars = new Set<string>();
-    const read = () => (consume('\\') ? next() : next());
+    const ranges: Ranges = [];
+
     while (peek() && peek() !== ']') {
-      const start = read().charCodeAt(0);
+      let e: Escape;
+      if (consume('\\')) {
+        e = readEscape();
+        if ('ranges' in e) {
+          ranges.push(...e.ranges);
+          continue;
+        }
+      } else {
+        e = { code: next().charCodeAt(0) };
+      }
+      const start = e.code;
       const end =
         peek() === '-' && pattern[i + 1] !== ']'
-          ? (next(), read().charCodeAt(0))
-          : start;
-      for (let c = start; c <= end; c++) chars.add(String.fromCharCode(c));
+          ? (next(),
+            consume('\\') ? readEscape() : { code: next().charCodeAt(0) })
+          : { code: start };
+      if ('ranges' in end)
+        throw new Error('Cannot use class shorthand as range endpoint');
+      ranges.push([start, end.code]);
     }
     if (!consume(']')) throw new Error('Unclosed [');
-    return { type: 'charset', chars, negate };
+    return { type: 'ranges', ranges, negate };
   }
 
   function parseAtom(): RE | null {
@@ -50,16 +133,13 @@ function parse(pattern: string): { re: RE; numSlots: number } {
       }
       case '.':
         next();
-        return { type: 'any' };
-      case '\\': {
+        return { type: 'ranges', ranges: [[10, 10]], negate: true };
+      case '\\':
         next();
-        const escaped = next();
-        if (escaped === undefined) throw new Error('Trailing \\');
-        return { type: 'char', c: escaped };
-      }
+        return escapeToRE(readEscape());
       default:
         next();
-        return { type: 'char', c };
+        return cc(c.charCodeAt(0));
     }
   }
 
@@ -105,14 +185,8 @@ export function compile(pattern: string): Program {
 
   function gen(re: RE): void {
     switch (re.type) {
-      case 'char':
-        emit({ op: 'char', c: re.c });
-        break;
-      case 'any':
-        emit({ op: 'any' });
-        break;
-      case 'charset':
-        emit({ op: 'charset', chars: re.chars, negate: re.negate });
+      case 'ranges':
+        emit({ op: 'ranges', ranges: re.ranges, negate: re.negate });
         break;
       case 'seq':
         re.items.forEach(gen);

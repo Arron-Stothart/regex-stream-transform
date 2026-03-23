@@ -1,7 +1,5 @@
 export type Inst =
-  | { op: 'char'; c: string }
-  | { op: 'charset'; chars: Set<string>; negate: boolean }
-  | { op: 'any' }
+  | { op: 'ranges'; ranges: [number, number][]; negate: boolean }
   | { op: 'jmp'; to: number }
   | { op: 'split'; x: number; y: number }
   | { op: 'save'; slot: number }
@@ -61,24 +59,18 @@ export function step(
   for (const t of threads) {
     const inst = prog.insts[t.pc];
 
-    switch (inst.op) {
-      case 'char':
-        if (char === inst.c) {
-          addThread(prog, next, seen, t.pc + 1, t.saved, pos + 1);
+    if (inst.op === 'ranges') {
+      const code = char.charCodeAt(0);
+      let hit = false;
+      for (const [lo, hi] of inst.ranges) {
+        if (code >= lo && code <= hi) {
+          hit = true;
+          break;
         }
-        break;
-      case 'charset': {
-        const match = inst.negate
-          ? !inst.chars.has(char)
-          : inst.chars.has(char);
-        if (match) {
-          addThread(prog, next, seen, t.pc + 1, t.saved, pos + 1);
-        }
-        break;
       }
-      case 'any':
+      if (hit !== inst.negate) {
         addThread(prog, next, seen, t.pc + 1, t.saved, pos + 1);
-        break;
+      }
     }
   }
 
