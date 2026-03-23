@@ -1,19 +1,19 @@
 import { describe, it, expect } from 'vitest';
 import { compile } from './compile';
-import { start, step, Program } from './vm';
+import { start, step, resolveAsserts, Program } from './vm';
 
 /** Run the VM and check if the pattern matches the input */
 function matches(prog: Program, input: string): boolean {
   let threads = start(prog, 0);
 
   for (let i = 0; i < input.length; i++) {
-    // Check for match before consuming (handles zero-width)
     if (threads.some((t) => prog.insts[t.pc]?.op === 'match')) return true;
     threads = step(prog, threads, input[i], i);
   }
 
-  // Check for match at end
-  return threads.some((t) => prog.insts[t.pc]?.op === 'match');
+  // Resolve end-of-text assertions, then check for match
+  const resolved = resolveAsserts(prog, threads, input.length);
+  return resolved.some((t) => prog.insts[t.pc]?.op === 'match');
 }
 
 /** Compile and match in one step */
@@ -52,7 +52,7 @@ describe('compile', () => {
 
     it('handles empty alternatives', () => {
       expect(test('a|', 'a')).toBe(true);
-      expect(test('a|', '')).toBe(true); // empty matches
+      expect(test('a|', '')).toBe(true);
       expect(test('|b', 'b')).toBe(true);
       expect(test('|b', '')).toBe(true);
     });
@@ -73,7 +73,7 @@ describe('compile', () => {
     it('works with alternation of quantified terms', () => {
       expect(test('a+|b+', 'aaa')).toBe(true);
       expect(test('a+|b+', 'bbb')).toBe(true);
-      expect(test('a+|b+', 'ab')).toBe(true); // 'a' matches a+
+      expect(test('a+|b+', 'ab')).toBe(true);
     });
 
     it('handles complex nested alternation', () => {
@@ -135,7 +135,7 @@ describe('compile', () => {
 
     it('.* stops at newline', () => {
       expect(test('.*', 'abc')).toBe(true);
-      expect(test('.*', 'abc\ndef')).toBe(true); // matches 'abc' before \n
+      expect(test('.*', 'abc\ndef')).toBe(true);
       expect(test('.*\n', 'abc\n')).toBe(true);
     });
 
@@ -244,6 +244,135 @@ describe('compile', () => {
       expect(test('[\\d.]', '9')).toBe(true);
       expect(test('[\\d.]', '.')).toBe(true);
       expect(test('[\\d.]', 'a')).toBe(false);
+    });
+  });
+
+  describe('anchors', () => {
+    it('^ matches at start of text', () => {
+      expect(test('^abc', 'abc')).toBe(true);
+      expect(test('^abc', 'abcdef')).toBe(true);
+    });
+
+    it('^ fails when not at start', () => {
+      expect(test('^b', 'ab')).toBe(false);
+    });
+
+    it('$ matches at end of text', () => {
+      expect(test('abc$', 'abc')).toBe(true);
+    });
+
+    it('$ fails when not at end', () => {
+      expect(test('abc$', 'abcd')).toBe(false);
+    });
+
+    it('^...$ anchors both ends', () => {
+      expect(test('^abc$', 'abc')).toBe(true);
+      expect(test('^abc$', 'abcd')).toBe(false);
+      expect(test('^abc$', 'zabc')).toBe(false);
+    });
+
+    it('^ works with quantifiers', () => {
+      expect(test('^a+', 'aaa')).toBe(true);
+      expect(test('^a+', 'baaa')).toBe(false);
+    });
+
+    it('$ works with quantifiers', () => {
+      expect(test('a+$', 'aaa')).toBe(true);
+    });
+
+    it('anchors work with alternation', () => {
+      expect(test('^(foo|bar)$', 'foo')).toBe(true);
+      expect(test('^(foo|bar)$', 'bar')).toBe(true);
+      expect(test('^(foo|bar)$', 'baz')).toBe(false);
+      expect(test('^(foo|bar)$', 'foobar')).toBe(false);
+    });
+  });
+
+  describe('non-greedy quantifiers', () => {
+    it('*? prefers zero matches', () => {
+      expect(test('a*?', '')).toBe(true);
+      expect(test('a*?', 'aaa')).toBe(true);
+    });
+
+    it('+? prefers one match', () => {
+      expect(test('a+?', '')).toBe(false);
+      expect(test('a+?', 'a')).toBe(true);
+      expect(test('a+?', 'aaa')).toBe(true);
+    });
+
+    it('?? prefers zero matches', () => {
+      expect(test('a??', '')).toBe(true);
+      expect(test('a??', 'a')).toBe(true);
+    });
+
+    it('non-greedy still matches when needed', () => {
+      expect(test('a*?b', 'aaab')).toBe(true);
+      expect(test('a+?b', 'aaab')).toBe(true);
+    });
+  });
+
+  describe('repetition counts', () => {
+    it('{n} matches exact count', () => {
+      expect(test('a{3}', 'aaa')).toBe(true);
+      expect(test('a{3}', 'aa')).toBe(false);
+      expect(test('a{3}', 'aaaa')).toBe(true); // prefix match
+    });
+
+    it('{n,m} matches between n and m', () => {
+      expect(test('a{2,4}', 'a')).toBe(false);
+      expect(test('a{2,4}', 'aa')).toBe(true);
+      expect(test('a{2,4}', 'aaa')).toBe(true);
+      expect(test('a{2,4}', 'aaaa')).toBe(true);
+      expect(test('a{2,4}', 'aaaaa')).toBe(true); // prefix match
+    });
+
+    it('{n,} matches n or more', () => {
+      expect(test('a{2,}', 'a')).toBe(false);
+      expect(test('a{2,}', 'aa')).toBe(true);
+      expect(test('a{2,}', 'aaaaa')).toBe(true);
+    });
+
+    it('{n,m}? is non-greedy', () => {
+      expect(test('a{2,4}?b', 'aaaab')).toBe(true);
+    });
+
+    it('works with groups', () => {
+      expect(test('(ab){2}', 'abab')).toBe(true);
+      expect(test('(ab){2}', 'ab')).toBe(false);
+    });
+
+    it('works with character classes', () => {
+      expect(test('[0-9]{3}', '123')).toBe(true);
+      expect(test('[0-9]{3}', '12')).toBe(false);
+    });
+  });
+
+  describe('non-capturing groups', () => {
+    it('(?:...) groups without capturing', () => {
+      expect(test('(?:abc)', 'abc')).toBe(true);
+      expect(test('(?:abc)', 'ab')).toBe(false);
+    });
+
+    it('works with quantifiers', () => {
+      expect(test('(?:ab)+', 'abab')).toBe(true);
+      expect(test('(?:ab)+', 'a')).toBe(false);
+    });
+
+    it('works with alternation', () => {
+      expect(test('(?:a|b)+', 'aba')).toBe(true);
+      expect(test('(?:a|b)+', 'c')).toBe(false);
+    });
+
+    it('does not allocate save slots', () => {
+      const prog = compile('(?:a)(b)');
+      // Only one capturing group → 2 save slots
+      expect(prog.numSlots).toBe(2);
+    });
+
+    it('nested with capturing', () => {
+      const prog = compile('(?:(a)(b))');
+      // Two capturing groups inside one non-capturing → 4 slots
+      expect(prog.numSlots).toBe(4);
     });
   });
 });

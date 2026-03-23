@@ -4,12 +4,13 @@ type Ranges = [number, number][];
 
 export type RE =
   | { type: 'ranges'; ranges: Ranges; negate: boolean }
+  | { type: 'assert'; kind: 'bot' | 'eot' }
   | { type: 'seq'; items: RE[] }
   | { type: 'alt'; left: RE; right: RE }
-  | { type: 'star'; body: RE }
-  | { type: 'plus'; body: RE }
-  | { type: 'opt'; body: RE }
-  | { type: 'group'; body: RE };
+  | { type: 'star'; body: RE; greedy: boolean }
+  | { type: 'plus'; body: RE; greedy: boolean }
+  | { type: 'opt'; body: RE; greedy: boolean }
+  | { type: 'group'; body: RE; capturing: boolean };
 
 type Escape = { ranges: Ranges; negate: boolean } | { code: number };
 
@@ -57,7 +58,7 @@ const ESCAPES: Record<string, Escape> = {
   },
 };
 
-const META = new Set('*+?()|[]{}\\.^$-'.split(''));
+const META = new Set('*+?()|[]{}\\.-'.split(''));
 
 function cc(code: number): RE {
   return { type: 'ranges', ranges: [[code, code]], negate: false };
@@ -119,18 +120,25 @@ function parse(pattern: string): { re: RE; numSlots: number } {
 
   function parseAtom(): RE | null {
     const c = peek();
-    if (c === undefined || '*+?)|'.includes(c)) return null;
+    if (c === undefined || '*+?)|}'.includes(c)) return null;
     switch (c) {
       case '[':
         next();
         return parseCharClass();
       case '(': {
         next();
+        const capturing = !(consume('?') && consume(':'));
         const body = parseAlt();
         if (!consume(')')) throw new Error('Unclosed (');
-        numSlots += 2;
-        return { type: 'group', body };
+        if (capturing) numSlots += 2;
+        return { type: 'group', body, capturing };
       }
+      case '^':
+        next();
+        return { type: 'assert', kind: 'bot' };
+      case '$':
+        next();
+        return { type: 'assert', kind: 'eot' };
       case '.':
         next();
         return { type: 'ranges', ranges: [[10, 10]], negate: true };
@@ -143,19 +151,52 @@ function parse(pattern: string): { re: RE; numSlots: number } {
     }
   }
 
+  function parseRepeat(atom: RE): RE | null {
+    if (!consume('{')) return null;
+    let num = '';
+    while (peek() && peek() >= '0' && peek() <= '9') num += next();
+    const min = num === '' ? 0 : +num;
+    let max = min;
+    if (consume(',')) {
+      num = '';
+      while (peek() && peek() >= '0' && peek() <= '9') num += next();
+      max = num === '' ? Infinity : +num;
+    }
+    if (!consume('}')) throw new Error('Unclosed {');
+    const greedy = !consume('?');
+
+    const items: RE[] = [];
+    for (let r = 0; r < min; r++) items.push(atom);
+    if (max === Infinity) {
+      items.push({ type: 'star', body: atom, greedy });
+    } else {
+      for (let r = 0; r < max - min; r++)
+        items.push({ type: 'opt', body: atom, greedy });
+    }
+    return items.length === 1 ? items[0] : { type: 'seq', items };
+  }
+
   function parseFactor(): RE | null {
     const atom = parseAtom();
     if (!atom) return null;
     switch (peek()) {
-      case '*':
+      case '*': {
         next();
-        return { type: 'star', body: atom };
-      case '+':
+        const greedy = !consume('?');
+        return { type: 'star', body: atom, greedy };
+      }
+      case '+': {
         next();
-        return { type: 'plus', body: atom };
-      case '?':
+        const greedy = !consume('?');
+        return { type: 'plus', body: atom, greedy };
+      }
+      case '?': {
         next();
-        return { type: 'opt', body: atom };
+        const greedy = !consume('?');
+        return { type: 'opt', body: atom, greedy };
+      }
+      case '{':
+        return parseRepeat(atom);
       default:
         return atom;
     }
@@ -188,6 +229,9 @@ export function compile(pattern: string): Program {
       case 'ranges':
         emit({ op: 'ranges', ranges: re.ranges, negate: re.negate });
         break;
+      case 'assert':
+        emit({ op: 'assert', kind: re.kind });
+        break;
       case 'seq':
         re.items.forEach(gen);
         break;
@@ -207,28 +251,38 @@ export function compile(pattern: string): Program {
         const bodyStart = insts.length;
         gen(re.body);
         emit({ op: 'jmp', to: s });
-        insts[s] = { op: 'split', x: bodyStart, y: insts.length };
+        const end = insts.length;
+        const [x, y] = re.greedy ? [bodyStart, end] : [end, bodyStart];
+        insts[s] = { op: 'split', x, y };
         break;
       }
       case 'plus': {
         const bodyStart = insts.length;
         gen(re.body);
-        emit({ op: 'split', x: bodyStart, y: insts.length + 1 });
+        const end = insts.length + 1;
+        const [x, y] = re.greedy ? [bodyStart, end] : [end, bodyStart];
+        emit({ op: 'split', x, y });
         break;
       }
       case 'opt': {
         const s = emit({ op: 'split', x: 0, y: 0 });
         const bodyStart = insts.length;
         gen(re.body);
-        insts[s] = { op: 'split', x: bodyStart, y: insts.length };
+        const end = insts.length;
+        const [x, y] = re.greedy ? [bodyStart, end] : [end, bodyStart];
+        insts[s] = { op: 'split', x, y };
         break;
       }
       case 'group': {
-        const slot = slotIndex;
-        slotIndex += 2;
-        emit({ op: 'save', slot });
-        gen(re.body);
-        emit({ op: 'save', slot: slot + 1 });
+        if (re.capturing) {
+          const slot = slotIndex;
+          slotIndex += 2;
+          emit({ op: 'save', slot });
+          gen(re.body);
+          emit({ op: 'save', slot: slot + 1 });
+        } else {
+          gen(re.body);
+        }
         break;
       }
     }

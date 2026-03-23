@@ -1,5 +1,5 @@
 import { compile } from './compile';
-import { Program, Thread, start, step } from './vm';
+import { Program, Thread, start, step, resolveAsserts } from './vm';
 
 export interface Match {
   text: string;
@@ -37,6 +37,11 @@ function findMatch(
 
     if (offset + i === len) {
       if (!complete && active.length > 0) return { status: 'partial' };
+      if (complete) {
+        const resolved = resolveAsserts(prog, active, i);
+        const m = resolved.find((t) => prog.insts[t.pc].op === 'match');
+        if (m) best = { end: i, thread: m };
+      }
       break;
     }
 

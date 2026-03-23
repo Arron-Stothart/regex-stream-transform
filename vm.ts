@@ -1,5 +1,6 @@
 export type Inst =
   | { op: 'ranges'; ranges: [number, number][]; negate: boolean }
+  | { op: 'assert'; kind: 'bot' | 'eot' }
   | { op: 'jmp'; to: number }
   | { op: 'split'; x: number; y: number }
   | { op: 'save'; slot: number }
@@ -42,6 +43,11 @@ function addThread(
       addThread(prog, threads, seen, pc + 1, newSaved, pos);
       break;
     }
+    case 'assert':
+      if (inst.kind === 'bot' && pos === 0)
+        addThread(prog, threads, seen, pc + 1, saved, pos);
+      else if (inst.kind === 'eot') threads.push({ pc, saved });
+      break;
     default:
       threads.push({ pc, saved });
   }
@@ -75,6 +81,22 @@ export function step(
   }
 
   return next;
+}
+
+export function resolveAsserts(
+  prog: Program,
+  threads: Thread[],
+  pos: number,
+): Thread[] {
+  const out: Thread[] = [];
+  const seen = new Set<number>();
+  for (const t of threads) {
+    const inst = prog.insts[t.pc];
+    if (inst.op === 'assert' && inst.kind === 'eot')
+      addThread(prog, out, seen, t.pc + 1, t.saved, pos);
+    else if (inst.op === 'match') out.push(t);
+  }
+  return out;
 }
 
 export function start(prog: Program, pos: number): Thread[] {
