@@ -30,24 +30,26 @@ function findMatch(
   let best: { end: number; thread: Thread } | null = null;
 
   for (let i = 0; i <= len - offset; i++) {
-    const match = threads.find((t) => prog.insts[t.pc].op === 'match');
-    if (match) best = { end: i, thread: match };
-
-    const active = threads.filter((t) => prog.insts[t.pc].op !== 'match');
+    const matchIdx = threads.findIndex((t) => prog.insts[t.pc].op === 'match');
+    if (matchIdx >= 0) {
+      best = { end: i, thread: threads[matchIdx] };
+      threads = threads.slice(0, matchIdx);
+      if (threads.length === 0) break;
+    }
 
     if (offset + i === len) {
-      if (!complete && active.length > 0) return { status: 'partial' };
+      if (!complete && threads.length > 0) return { status: 'partial' };
       if (complete) {
-        const resolved = resolveAsserts(prog, active, i);
+        const resolved = resolveAsserts(prog, threads, i);
         const m = resolved.find((t) => prog.insts[t.pc].op === 'match');
         if (m) best = { end: i, thread: m };
       }
       break;
     }
 
-    if (active.length === 0) break;
+    if (threads.length === 0) break;
 
-    threads = step(prog, active, text[offset + i], i);
+    threads = step(prog, threads, text[offset + i], i);
   }
 
   return best ? { status: 'match', ...best } : { status: 'none' };
