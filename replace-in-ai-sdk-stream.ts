@@ -1,5 +1,10 @@
 import type { ToolSet, TextStreamPart, StreamTextTransform } from 'ai';
-import { process, type State, type Replacement } from './replace-in-stream';
+import {
+  initialState,
+  process,
+  type State,
+  type Replacement,
+} from './replace-in-stream';
 import { compile } from './compile';
 
 export function replaceInAISDKStream<TOOLS extends ToolSet = ToolSet>({
@@ -12,7 +17,7 @@ export function replaceInAISDKStream<TOOLS extends ToolSet = ToolSet>({
   return () => {
     const prog =
       typeof pattern === 'string' ? compile(pattern) : compile(pattern.source);
-    let state: State = { buffer: '', globalPos: 0 };
+    let state: State = initialState();
     let id = '';
 
     const emit = (
@@ -34,7 +39,7 @@ export function replaceInAISDKStream<TOOLS extends ToolSet = ToolSet>({
               true,
             );
             emit(controller, output + s.buffer);
-            state = { buffer: '', globalPos: s.globalPos };
+            state = { buffer: '', globalPos: s.globalPos, context: s.context };
           }
           controller.enqueue(chunk);
           return;

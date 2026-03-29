@@ -6,8 +6,14 @@ type Esc = { ranges: Ranges; negate: boolean } | { code: number };
 export type Expr =
   | { type: 'alternation'; branches: Expr[] }
   | { type: 'sequence'; parts: Expr[] }
-  | { type: 'repeat'; child: Expr; min: number; max: number | null; greedy: boolean }
-  | { type: 'group'; child: Expr; capturing: boolean }
+  | {
+      type: 'repeat';
+      child: Expr;
+      min: number;
+      max: number | null;
+      greedy: boolean;
+    }
+  | { type: 'group'; child: Expr; capturing: boolean; slot?: number }
   | { type: 'ranges'; ranges: Ranges; negate: boolean }
   | { type: 'assert'; kind: 'bot' | 'eot' };
 
@@ -21,10 +27,38 @@ const ESCAPES: Record<string, Esc> = {
   '0': { code: 0 },
   d: { ranges: [[48, 57]], negate: false },
   D: { ranges: [[48, 57]], negate: true },
-  w: { ranges: [[48, 57], [65, 90], [97, 122], [95, 95]], negate: false },
-  W: { ranges: [[48, 57], [65, 90], [97, 122], [95, 95]], negate: true },
-  s: { ranges: [[9, 13], [32, 32]], negate: false },
-  S: { ranges: [[9, 13], [32, 32]], negate: true },
+  w: {
+    ranges: [
+      [48, 57],
+      [65, 90],
+      [97, 122],
+      [95, 95],
+    ],
+    negate: false,
+  },
+  W: {
+    ranges: [
+      [48, 57],
+      [65, 90],
+      [97, 122],
+      [95, 95],
+    ],
+    negate: true,
+  },
+  s: {
+    ranges: [
+      [9, 13],
+      [32, 32],
+    ],
+    negate: false,
+  },
+  S: {
+    ranges: [
+      [9, 13],
+      [32, 32],
+    ],
+    negate: true,
+  },
 };
 
 const META = new Set('*+?()|[]{}\\.-'.split(''));
@@ -168,10 +202,22 @@ export function parse(pattern: string): Expr {
     switch (peek()) {
       case '*':
         next();
-        return { type: 'repeat', child, min: 0, max: null, greedy: !consume('?') };
+        return {
+          type: 'repeat',
+          child,
+          min: 0,
+          max: null,
+          greedy: !consume('?'),
+        };
       case '+':
         next();
-        return { type: 'repeat', child, min: 1, max: null, greedy: !consume('?') };
+        return {
+          type: 'repeat',
+          child,
+          min: 1,
+          max: null,
+          greedy: !consume('?'),
+        };
       case '?':
         next();
         return { type: 'repeat', child, min: 0, max: 1, greedy: !consume('?') };
@@ -202,36 +248,14 @@ export function parse(pattern: string): Expr {
   return expr;
 }
 
+// Compiles an AST as-is. Callers that intend to execute the program through
+// the stream matcher should usually use compile(), which wraps the AST in the
+// implicit whole-match capture stored in slots 0/1.
 export function compileAst(expr: Expr): Program {
   const insts: Inst[] = [];
-  const groupSlots = new WeakMap<Extract<Expr, { type: 'group' }>, number>();
   let numSlots = 0;
 
   const emit = (inst: Inst) => (insts.push(inst), insts.length - 1);
-
-  function assignSlots(node: Expr): void {
-    switch (node.type) {
-      case 'alternation':
-        for (const branch of node.branches) assignSlots(branch);
-        break;
-      case 'sequence':
-        for (const part of node.parts) assignSlots(part);
-        break;
-      case 'repeat':
-        assignSlots(node.child);
-        break;
-      case 'group':
-        if (node.capturing) {
-          groupSlots.set(node, numSlots);
-          numSlots += 2;
-        }
-        assignSlots(node.child);
-        break;
-      case 'ranges':
-      case 'assert':
-        break;
-    }
-  }
 
   function compileExpr(node: Expr): void {
     switch (node.type) {
@@ -250,8 +274,11 @@ export function compileAst(expr: Expr): Program {
           break;
         }
         {
-          const slot = groupSlots.get(node);
-          if (slot === undefined) throw new Error('Missing capture slot');
+          const slot = node.slot ?? numSlots;
+          if (node.slot === undefined) {
+            node.slot = slot;
+            numSlots += 2;
+          }
           emit({ op: 'save', slot });
           compileExpr(node.child);
           emit({ op: 'save', slot: slot + 1 });
@@ -267,21 +294,24 @@ export function compileAst(expr: Expr): Program {
   }
 
   function compileAlternation(branches: Expr[]): void {
-    if (branches.length === 0) return;
-    if (branches.length === 1) {
-      compileExpr(branches[0]);
-      return;
+    function compileBranch(index: number): void {
+      if (index >= branches.length) return;
+      if (index === branches.length - 1) {
+        compileExpr(branches[index]);
+        return;
+      }
+
+      const split = emit({ op: 'split', x: 0, y: 0 });
+      const leftStart = insts.length;
+      compileExpr(branches[index]);
+      const jump = emit({ op: 'jmp', to: 0 });
+      const rightStart = insts.length;
+      compileBranch(index + 1);
+      insts[split] = { op: 'split', x: leftStart, y: rightStart };
+      insts[jump] = { op: 'jmp', to: insts.length };
     }
 
-    const [left, right, ...rest] = branches;
-    const split = emit({ op: 'split', x: 0, y: 0 });
-    const leftStart = insts.length;
-    compileExpr(left);
-    const jump = emit({ op: 'jmp', to: 0 });
-    const rightStart = insts.length;
-    compileAlternation([right, ...rest]);
-    insts[split] = { op: 'split', x: leftStart, y: rightStart };
-    insts[jump] = { op: 'jmp', to: insts.length };
+    compileBranch(0);
   }
 
   function compileRepeat(node: Extract<Expr, { type: 'repeat' }>): void {
@@ -316,13 +346,14 @@ export function compileAst(expr: Expr): Program {
     insts[split] = { op: 'split', x, y };
   }
 
-  assignSlots(expr);
   compileExpr(expr);
   emit({ op: 'match' });
   return { insts, numSlots };
 }
 
 export function compile(pattern: string): Program {
+  // Reserve slots 0/1 for the whole match so the VM can track unanchored
+  // search starts without adding extra thread metadata.
   return compileAst({
     type: 'group',
     child: parse(pattern),

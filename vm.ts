@@ -16,6 +16,11 @@ export interface Program {
   numSlots: number;
 }
 
+export interface BoundaryContext {
+  atBot: boolean;
+  prevCode: number | null;
+}
+
 function addThread(
   prog: Program,
   threads: Thread[],
@@ -23,7 +28,7 @@ function addThread(
   pc: number,
   saved: (number | null)[],
   pos: number,
-  atBot: boolean,
+  context: BoundaryContext,
 ): void {
   if (pc >= prog.insts.length || seen.has(pc)) return;
   seen.add(pc);
@@ -32,21 +37,21 @@ function addThread(
 
   switch (inst.op) {
     case 'jmp':
-      addThread(prog, threads, seen, inst.to, saved, pos, atBot);
+      addThread(prog, threads, seen, inst.to, saved, pos, context);
       break;
     case 'split':
-      addThread(prog, threads, seen, inst.x, saved, pos, atBot);
-      addThread(prog, threads, seen, inst.y, saved, pos, atBot);
+      addThread(prog, threads, seen, inst.x, saved, pos, context);
+      addThread(prog, threads, seen, inst.y, saved, pos, context);
       break;
     case 'save': {
       const newSaved = [...saved];
       newSaved[inst.slot] = pos;
-      addThread(prog, threads, seen, pc + 1, newSaved, pos, atBot);
+      addThread(prog, threads, seen, pc + 1, newSaved, pos, context);
       break;
     }
     case 'assert':
-      if (inst.kind === 'bot' && atBot)
-        addThread(prog, threads, seen, pc + 1, saved, pos, atBot);
+      if (inst.kind === 'bot' && context.atBot)
+        addThread(prog, threads, seen, pc + 1, saved, pos, context);
       else if (inst.kind === 'eot') threads.push({ pc, saved });
       break;
     default:
@@ -59,10 +64,10 @@ export function addStartThread(
   threads: Thread[],
   seen: Set<number>,
   pos: number,
-  atBot: boolean,
+  context: BoundaryContext,
 ): void {
   const saved = new Array(prog.numSlots).fill(null);
-  addThread(prog, threads, seen, 0, saved, pos, atBot);
+  addThread(prog, threads, seen, 0, saved, pos, context);
 }
 
 export function step(
@@ -70,7 +75,7 @@ export function step(
   threads: Thread[],
   char: string,
   pos: number,
-  atBot: boolean,
+  context: BoundaryContext,
 ): { threads: Thread[]; seen: Set<number> } {
   const next: Thread[] = [];
   const seen = new Set<number>();
@@ -88,7 +93,7 @@ export function step(
         }
       }
       if (hit !== inst.negate) {
-        addThread(prog, next, seen, t.pc + 1, t.saved, pos + 1, atBot);
+        addThread(prog, next, seen, t.pc + 1, t.saved, pos + 1, context);
       }
     }
   }
@@ -100,22 +105,15 @@ export function resolveAsserts(
   prog: Program,
   threads: Thread[],
   pos: number,
-  atBot: boolean,
+  context: BoundaryContext,
 ): Thread[] {
   const out: Thread[] = [];
   const seen = new Set<number>();
   for (const t of threads) {
     const inst = prog.insts[t.pc];
     if (inst.op === 'assert' && inst.kind === 'eot')
-      addThread(prog, out, seen, t.pc + 1, t.saved, pos, atBot);
+      addThread(prog, out, seen, t.pc + 1, t.saved, pos, context);
     else if (inst.op === 'match') out.push(t);
   }
   return out;
-}
-
-export function start(prog: Program, pos: number, atBot: boolean): Thread[] {
-  const threads: Thread[] = [];
-  const seen = new Set<number>();
-  addStartThread(prog, threads, seen, pos, atBot);
-  return threads;
 }
