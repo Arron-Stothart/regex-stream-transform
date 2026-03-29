@@ -3,6 +3,14 @@ import { Inst, Program } from './vm';
 type Ranges = [number, number][];
 type Esc = { ranges: Ranges; negate: boolean } | { code: number };
 
+export type Expr =
+  | { type: 'alternation'; branches: Expr[] }
+  | { type: 'sequence'; parts: Expr[] }
+  | { type: 'repeat'; child: Expr; min: number; max: number | null; greedy: boolean }
+  | { type: 'group'; child: Expr; capturing: boolean }
+  | { type: 'ranges'; ranges: Ranges; negate: boolean }
+  | { type: 'assert'; kind: 'bot' | 'eot' };
+
 const ESCAPES: Record<string, Esc> = {
   t: { code: 9 },
   n: { code: 10 },
@@ -28,16 +36,12 @@ function resolveEscape(c: string): Esc {
   throw new Error(`Invalid escape \\${c}`);
 }
 
-export function compile(pattern: string): Program {
-  const insts: Inst[] = [];
+export function parse(pattern: string): Expr {
   let i = 0;
-  let numSlots = 0;
-  type Emit = () => void;
 
   const peek = () => pattern[i];
   const next = () => pattern[i++];
   const consume = (c: string) => peek() === c && (next(), true);
-  const emit = (inst: Inst) => (insts.push(inst), insts.length - 1);
 
   function readEscape(): Esc {
     const c = next();
@@ -45,13 +49,11 @@ export function compile(pattern: string): Program {
     return resolveEscape(c);
   }
 
-  function emitRanges(e: Esc): void {
-    if ('code' in e)
-      emit({ op: 'ranges', ranges: [[e.code, e.code]], negate: false });
-    else emit({ op: 'ranges', ranges: e.ranges, negate: e.negate });
+  function literal(code: number): Expr {
+    return { type: 'ranges', ranges: [[code, code]], negate: false };
   }
 
-  function charClass(): Emit {
+  function parseCharClass(): Expr {
     const negate = consume('^');
     const ranges: Ranges = [];
 
@@ -64,167 +66,266 @@ export function compile(pattern: string): Program {
           continue;
         }
       } else {
-        e = { code: next().charCodeAt(0) };
+        const c = next();
+        if (c === undefined) throw new Error('Unclosed [');
+        e = { code: c.charCodeAt(0) };
       }
+
       const start = e.code;
       const end =
         peek() === '-' && pattern[i + 1] !== ']'
           ? (next(),
-            consume('\\') ? readEscape() : { code: next().charCodeAt(0) })
+            consume('\\')
+              ? readEscape()
+              : (() => {
+                  const c = next();
+                  if (c === undefined) throw new Error('Unclosed [');
+                  return { code: c.charCodeAt(0) };
+                })())
           : { code: start };
+
       if ('ranges' in end)
         throw new Error('Cannot use class shorthand as range endpoint');
       ranges.push([start, end.code]);
     }
+
     if (!consume(']')) throw new Error('Unclosed [');
-    return () => emit({ op: 'ranges', ranges, negate });
+    return { type: 'ranges', ranges, negate };
   }
 
-  function atom(): Emit | null {
+  function parseAtom(): Expr | null {
     const c = peek();
     if (c === undefined || '*+?)|}'.includes(c)) return null;
+
     switch (c) {
       case '[':
         next();
-        return charClass();
+        return parseCharClass();
       case '(': {
         next();
-        const capturing = !(consume('?') && consume(':'));
-        const inner = alt();
+        let capturing = true;
+        if (consume('?')) {
+          if (!consume(':')) throw new Error('Unsupported group syntax');
+          capturing = false;
+        }
+        const child = parseAlternation();
         if (!consume(')')) throw new Error('Unclosed (');
-        if (!capturing) return inner;
-        const slot = numSlots;
-        numSlots += 2;
-        return () => {
-          emit({ op: 'save', slot });
-          inner();
-          emit({ op: 'save', slot: slot + 1 });
-        };
+        return { type: 'group', child, capturing };
       }
       case '^':
         next();
-        return () => emit({ op: 'assert', kind: 'bot' });
+        return { type: 'assert', kind: 'bot' };
       case '$':
         next();
-        return () => emit({ op: 'assert', kind: 'eot' });
+        return { type: 'assert', kind: 'eot' };
       case '.':
         next();
-        return () => emit({ op: 'ranges', ranges: [[10, 10]], negate: true });
-      case '\\': {
+        return { type: 'ranges', ranges: [[10, 10]], negate: true };
+      case '\\':
         next();
-        const e = readEscape();
-        return () => emitRanges(e);
-      }
-      default: {
+        return emitEscapeNode(readEscape());
+      default:
         next();
-        const code = c.charCodeAt(0);
-        return () =>
-          emit({ op: 'ranges', ranges: [[code, code]], negate: false });
-      }
+        return literal(c.charCodeAt(0));
     }
   }
 
-  function star(body: Emit, greedy: boolean): Emit {
-    return () => {
-      const s = emit({ op: 'split', x: 0, y: 0 });
-      const bodyStart = insts.length;
-      body();
-      emit({ op: 'jmp', to: s });
-      const end = insts.length;
-      const [x, y] = greedy ? [bodyStart, end] : [end, bodyStart];
-      insts[s] = { op: 'split', x, y };
-    };
+  function emitEscapeNode(e: Esc): Expr {
+    return 'code' in e
+      ? literal(e.code)
+      : { type: 'ranges', ranges: e.ranges, negate: e.negate };
   }
 
-  function plus(body: Emit, greedy: boolean): Emit {
-    return () => {
-      const bodyStart = insts.length;
-      body();
-      const end = insts.length + 1;
-      const [x, y] = greedy ? [bodyStart, end] : [end, bodyStart];
-      emit({ op: 'split', x, y });
-    };
-  }
-
-  function opt(body: Emit, greedy: boolean): Emit {
-    return () => {
-      const s = emit({ op: 'split', x: 0, y: 0 });
-      const bodyStart = insts.length;
-      body();
-      const end = insts.length;
-      const [x, y] = greedy ? [bodyStart, end] : [end, bodyStart];
-      insts[s] = { op: 'split', x, y };
-    };
-  }
-
-  function repeat(body: Emit): Emit {
+  function parseRepeat(child: Expr): Expr {
     next();
     let num = '';
     while (peek() && peek() >= '0' && peek() <= '9') num += next();
-    const min = num === '' ? 0 : +num;
+    if (num === '') throw new Error('Expected repeat count');
+    const min = +num;
     let max = min;
+
     if (consume(',')) {
       num = '';
       while (peek() && peek() >= '0' && peek() <= '9') num += next();
       max = num === '' ? Infinity : +num;
     }
-    if (!consume('}')) throw new Error('Unclosed {');
-    const greedy = !consume('?');
 
-    return () => {
-      for (let r = 0; r < min; r++) body();
-      if (max === Infinity) star(body, greedy)();
-      else for (let r = 0; r < max - min; r++) opt(body, greedy)();
+    if (!consume('}')) throw new Error('Unclosed {');
+    if (max < min) throw new Error('Repeat range out of order');
+    return {
+      type: 'repeat',
+      child,
+      min,
+      max: max === Infinity ? null : max,
+      greedy: !consume('?'),
     };
   }
 
-  function factor(): Emit | null {
-    const body = atom();
-    if (!body) return null;
+  function parseFactor(): Expr | null {
+    const child = parseAtom();
+    if (!child) return null;
+
     switch (peek()) {
       case '*':
         next();
-        return star(body, !consume('?'));
+        return { type: 'repeat', child, min: 0, max: null, greedy: !consume('?') };
       case '+':
         next();
-        return plus(body, !consume('?'));
+        return { type: 'repeat', child, min: 1, max: null, greedy: !consume('?') };
       case '?':
         next();
-        return opt(body, !consume('?'));
+        return { type: 'repeat', child, min: 0, max: 1, greedy: !consume('?') };
       case '{':
-        return repeat(body);
+        return parseRepeat(child);
       default:
-        return body;
+        return child;
     }
   }
 
-  function term(): Emit {
-    const parts: Emit[] = [];
-    let f;
-    while ((f = factor())) parts.push(f);
-    return () => parts.forEach((f) => f());
+  function parseSequence(): Expr {
+    const parts: Expr[] = [];
+    let part: Expr | null;
+    while ((part = parseFactor())) parts.push(part);
+    return { type: 'sequence', parts };
   }
 
-  function alt(): Emit {
-    let left = term();
-    while (consume('|')) {
-      const prev = left;
-      const right = term();
-      left = () => {
-        const s = emit({ op: 'split', x: 0, y: 0 });
-        const leftStart = insts.length;
-        prev();
-        const j = emit({ op: 'jmp', to: 0 });
-        const rightStart = insts.length;
-        right();
-        insts[s] = { op: 'split', x: leftStart, y: rightStart };
-        insts[j] = { op: 'jmp', to: insts.length };
-      };
+  function parseAlternation(): Expr {
+    const branches = [parseSequence()];
+    while (consume('|')) branches.push(parseSequence());
+    return branches.length === 1
+      ? branches[0]
+      : { type: 'alternation', branches };
+  }
+
+  const expr = parseAlternation();
+  if (peek() !== undefined) throw new Error(`Unexpected ${peek()}`);
+  return expr;
+}
+
+export function compileAst(expr: Expr): Program {
+  const insts: Inst[] = [];
+  const groupSlots = new WeakMap<Extract<Expr, { type: 'group' }>, number>();
+  let numSlots = 0;
+
+  const emit = (inst: Inst) => (insts.push(inst), insts.length - 1);
+
+  function assignSlots(node: Expr): void {
+    switch (node.type) {
+      case 'alternation':
+        for (const branch of node.branches) assignSlots(branch);
+        break;
+      case 'sequence':
+        for (const part of node.parts) assignSlots(part);
+        break;
+      case 'repeat':
+        assignSlots(node.child);
+        break;
+      case 'group':
+        if (node.capturing) {
+          groupSlots.set(node, numSlots);
+          numSlots += 2;
+        }
+        assignSlots(node.child);
+        break;
+      case 'ranges':
+      case 'assert':
+        break;
     }
-    return left;
   }
 
-  alt()();
+  function compileExpr(node: Expr): void {
+    switch (node.type) {
+      case 'alternation':
+        compileAlternation(node.branches);
+        break;
+      case 'sequence':
+        for (const part of node.parts) compileExpr(part);
+        break;
+      case 'repeat':
+        compileRepeat(node);
+        break;
+      case 'group':
+        if (!node.capturing) {
+          compileExpr(node.child);
+          break;
+        }
+        {
+          const slot = groupSlots.get(node);
+          if (slot === undefined) throw new Error('Missing capture slot');
+          emit({ op: 'save', slot });
+          compileExpr(node.child);
+          emit({ op: 'save', slot: slot + 1 });
+        }
+        break;
+      case 'ranges':
+        emit({ op: 'ranges', ranges: node.ranges, negate: node.negate });
+        break;
+      case 'assert':
+        emit({ op: 'assert', kind: node.kind });
+        break;
+    }
+  }
+
+  function compileAlternation(branches: Expr[]): void {
+    if (branches.length === 0) return;
+    if (branches.length === 1) {
+      compileExpr(branches[0]);
+      return;
+    }
+
+    const [left, right, ...rest] = branches;
+    const split = emit({ op: 'split', x: 0, y: 0 });
+    const leftStart = insts.length;
+    compileExpr(left);
+    const jump = emit({ op: 'jmp', to: 0 });
+    const rightStart = insts.length;
+    compileAlternation([right, ...rest]);
+    insts[split] = { op: 'split', x: leftStart, y: rightStart };
+    insts[jump] = { op: 'jmp', to: insts.length };
+  }
+
+  function compileRepeat(node: Extract<Expr, { type: 'repeat' }>): void {
+    for (let r = 0; r < node.min; r++) compileExpr(node.child);
+
+    if (node.max === null) {
+      compileStar(node.child, node.greedy);
+      return;
+    }
+
+    for (let r = 0; r < node.max - node.min; r++) {
+      compileOptional(node.child, node.greedy);
+    }
+  }
+
+  function compileStar(child: Expr, greedy: boolean): void {
+    const split = emit({ op: 'split', x: 0, y: 0 });
+    const bodyStart = insts.length;
+    compileExpr(child);
+    emit({ op: 'jmp', to: split });
+    const end = insts.length;
+    const [x, y] = greedy ? [bodyStart, end] : [end, bodyStart];
+    insts[split] = { op: 'split', x, y };
+  }
+
+  function compileOptional(child: Expr, greedy: boolean): void {
+    const split = emit({ op: 'split', x: 0, y: 0 });
+    const bodyStart = insts.length;
+    compileExpr(child);
+    const end = insts.length;
+    const [x, y] = greedy ? [bodyStart, end] : [end, bodyStart];
+    insts[split] = { op: 'split', x, y };
+  }
+
+  assignSlots(expr);
+  compileExpr(expr);
   emit({ op: 'match' });
   return { insts, numSlots };
+}
+
+export function compile(pattern: string): Program {
+  return compileAst({
+    type: 'group',
+    child: parse(pattern),
+    capturing: true,
+  });
 }

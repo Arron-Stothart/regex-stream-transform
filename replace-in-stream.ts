@@ -1,5 +1,12 @@
 import { compile } from './compile';
-import { Program, Thread, start, step, resolveAsserts } from './vm';
+import {
+  addStartThread,
+  Program,
+  Thread,
+  start,
+  step,
+  resolveAsserts,
+} from './vm';
 
 export interface Match {
   text: string;
@@ -15,41 +22,70 @@ export interface State {
 export type Replacement = string | ((match: Match) => string);
 
 type MatchResult =
-  | { status: 'match'; end: number; thread: Thread }
+  | { status: 'match'; start: number; end: number; thread: Thread }
   | { status: 'none' }
-  | { status: 'partial' };
+  | { status: 'partial'; keepFrom: number };
 
 function findMatch(
   prog: Program,
   text: string,
   offset: number,
   complete: boolean,
+  atBot: boolean,
 ): MatchResult {
-  const len = text.length;
-  let threads = start(prog, 0);
-  let best: { end: number; thread: Thread } | null = null;
+  let threads = start(prog, offset, atBot && offset === 0);
+  let best: { start: number; end: number; thread: Thread } | null = null;
 
-  for (let i = 0; i <= len - offset; i++) {
-    const matchIdx = threads.findIndex((t) => prog.insts[t.pc].op === 'match');
-    if (matchIdx >= 0) {
-      best = { end: i, thread: threads[matchIdx] };
-      threads = threads.slice(0, matchIdx);
-      if (threads.length === 0) break;
+  const threadStart = (t: Thread) => t.saved[0] ?? offset;
+  const threadEnd = (t: Thread) => t.saved[1] ?? threadStart(t);
+  const isMatch = (t: Thread) => prog.insts[t.pc].op === 'match';
+
+  for (let pos = offset; pos <= text.length; pos++) {
+    let current = threads;
+    const posAtBot = atBot && pos === 0;
+
+    if (pos === text.length && complete) {
+      current = resolveAsserts(prog, current, pos, posAtBot);
     }
 
-    if (offset + i === len) {
-      if (!complete && threads.length > 0) return { status: 'partial' };
-      if (complete) {
-        const resolved = resolveAsserts(prog, threads, i);
-        const m = resolved.find((t) => prog.insts[t.pc].op === 'match');
-        if (m) best = { end: i, thread: m };
+    const matches = current.filter(isMatch);
+    if (matches.length > 0) {
+      let chosen = matches[0];
+      for (const candidate of matches.slice(1)) {
+        if (threadStart(candidate) < threadStart(chosen)) {
+          chosen = candidate;
+        }
+      }
+
+      const start = threadStart(chosen);
+      const end = threadEnd(chosen);
+      if (!best || start < best.start) {
+        best = { start, end, thread: chosen };
+      }
+
+      const bestStart = best.start;
+      current = current.filter(
+        (t) => !isMatch(t) && threadStart(t) === bestStart,
+      );
+      if (current.length === 0) break;
+    }
+
+    if (pos === text.length) {
+      if (!complete && current.length > 0) {
+        const keepFrom = best
+          ? best.start
+          : current.reduce(
+              (earliest, t) => Math.min(earliest, threadStart(t)),
+              text.length,
+            );
+        return { status: 'partial', keepFrom };
       }
       break;
     }
 
-    if (threads.length === 0) break;
-
-    threads = step(prog, threads, text[offset + i], i);
+    const next = step(prog, current, text[pos], pos, false);
+    if (!best) addStartThread(prog, next.threads, next.seen, pos + 1, false);
+    threads = next.threads;
   }
 
   return best ? { status: 'match', ...best } : { status: 'none' };
@@ -58,15 +94,12 @@ function findMatch(
 function extractGroups(
   saved: (number | null)[],
   source: string,
-  offset: number,
 ): string[] {
   const groups: string[] = [];
-  for (let i = 0; i < saved.length; i += 2) {
+  for (let i = 2; i < saved.length; i += 2) {
     const s = saved[i];
     const e = saved[i + 1];
-    groups.push(
-      s !== null && e !== null ? source.slice(offset + s, offset + e) : '',
-    );
+    groups.push(s !== null && e !== null ? source.slice(s, e) : '');
   }
   return groups;
 }
@@ -98,46 +131,66 @@ export function process(
   buffer += chunk;
   let output = '';
   let pos = 0;
+  let consumedFinalEmptyMatch = false;
 
   while (pos < buffer.length) {
-    const result = findMatch(prog, buffer, pos, flush);
+    const result = findMatch(prog, buffer, pos, flush, globalPos === 0);
 
     switch (result.status) {
       case 'match': {
-        const { end, thread } = result;
-        const text = buffer.slice(pos, pos + end);
-        const groups = extractGroups(thread.saved, buffer, pos);
-        output += applyReplacement(replacement, text, groups, globalPos);
+        const { start, end, thread } = result;
+        output += buffer.slice(pos, start);
 
-        if (end === 0) {
-          output += buffer[pos];
-          pos++;
-          globalPos++;
+        const text = buffer.slice(start, end);
+        const groups = extractGroups(thread.saved, buffer);
+        output += applyReplacement(
+          replacement,
+          text,
+          groups,
+          globalPos + (start - pos),
+        );
+
+        if (start === end) {
+          if (flush && end === buffer.length) consumedFinalEmptyMatch = true;
+          const nextChar = buffer[end];
+          if (nextChar !== undefined) {
+            output += nextChar;
+            globalPos += end + 1 - pos;
+            pos = end + 1;
+          } else {
+            globalPos += end - pos;
+            pos = end;
+          }
         } else {
-          pos += end;
-          globalPos += end;
+          globalPos += end - pos;
+          pos = end;
         }
         break;
       }
 
       case 'none':
-        output += buffer[pos];
-        pos++;
-        globalPos++;
+        output += buffer.slice(pos);
+        globalPos += buffer.length - pos;
+        pos = buffer.length;
         break;
 
       case 'partial':
+        output += buffer.slice(pos, result.keepFrom);
+        globalPos += result.keepFrom - pos;
         return {
           output,
-          state: { buffer: buffer.slice(pos), globalPos },
+          state: {
+            buffer: buffer.slice(result.keepFrom),
+            globalPos,
+          },
         };
     }
   }
 
-  if (flush) {
-    const result = findMatch(prog, '', 0, true);
-    if (result.status === 'match') {
-      const groups = extractGroups(result.thread.saved, '', 0);
+  if (flush && !consumedFinalEmptyMatch) {
+    const result = findMatch(prog, buffer, pos, true, globalPos === 0);
+    if (result.status === 'match' && result.start === pos && result.end === pos) {
+      const groups = extractGroups(result.thread.saved, '');
       output += applyReplacement(replacement, '', groups, globalPos);
     }
   }
